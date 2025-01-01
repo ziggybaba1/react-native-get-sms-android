@@ -1,6 +1,8 @@
 
 package com.react;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
 import com.facebook.react.bridge.Arguments;
 import com.facebook.react.bridge.Callback;
 import com.facebook.react.bridge.NativeModule;
@@ -34,6 +36,7 @@ import android.telephony.SmsManager;
 import android.telephony.SmsMessage;
 import android.telephony.SubscriptionInfo;
 import android.telephony.SubscriptionManager;
+import androidx.core.content.ContextCompat;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -233,91 +236,148 @@ public class SmsModule extends ReactContextBaseJavaModule /*implements LoaderMan
     }
 
     @ReactMethod
-    public void autoSendMultiSim(Integer simSlot, String phoneNumber, String message,
-                                 final Callback errorCallback, final Callback successCallback) {
+public void autoSendMultiSim(Integer simSlot, String phoneNumber, String message,
+                            final Callback errorCallback, final Callback successCallback) {
+    cb_autoSend_succ = successCallback;
+    cb_autoSend_err = errorCallback;
+    try {
+        // First check for SMS and phone state permissions
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.SEND_SMS) 
+            != PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) 
+            != PackageManager.PERMISSION_GRANTED) {
+            sendCallback("Missing required permissions: SEND_SMS or READ_PHONE_STATE", false);
+            return;
+        }
 
-        cb_autoSend_succ = successCallback;
-        cb_autoSend_err = errorCallback;
+        String SENT = "com.smsapp.SMS_SENT";
+        String DELIVERED = "com.smsapp.SMS_DELIVERED";
+        ArrayList<PendingIntent> sentPendingIntents = new ArrayList<PendingIntent>();
+        ArrayList<PendingIntent> deliveredPendingIntents = new ArrayList<PendingIntent>();
 
-        try {
-            String SENT = "SMS_SENT";
-            String DELIVERED = "SMS_DELIVERED";
-            ArrayList<PendingIntent> sentPendingIntents = new ArrayList<PendingIntent>();
-            ArrayList<PendingIntent> deliveredPendingIntents = new ArrayList<PendingIntent>();
+        Intent sentIntent = new Intent(SENT);
+        Intent deliveredIntent = new Intent(DELIVERED);
+        
+        String packageName = context.getPackageName();
+        sentIntent.setPackage(packageName);
+        deliveredIntent.setPackage(packageName);
 
-            PendingIntent sentPI = PendingIntent.getBroadcast(context, 0, new Intent(SENT), 0);
-            PendingIntent deliveredPI = PendingIntent.getBroadcast(context, 0, new Intent(DELIVERED), 0);
+        int flags;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE;
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            flags = PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_MUTABLE;
+        } else {
+            flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        }
 
-            //---when the SMS has been sent---
-            context.registerReceiver(new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context arg0, Intent arg1) {
-                    switch (getResultCode()) {
-                        case Activity.RESULT_OK:
-                            sendCallback("SMS sent", true);
-                            break;
-                        case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
-                            sendCallback("Generic failure", false);
-                            break;
-                        case SmsManager.RESULT_ERROR_NO_SERVICE:
-                            sendCallback("No service", false);
-                            break;
-                        case SmsManager.RESULT_ERROR_NULL_PDU:
-                            sendCallback("Null PDU", false);
-                            break;
-                        case SmsManager.RESULT_ERROR_RADIO_OFF:
-                            sendCallback("Radio off", false);
-                            break;
-                    }
+        PendingIntent sentPI = PendingIntent.getBroadcast(context, 0, sentIntent, flags);
+        PendingIntent deliveredPI = PendingIntent.getBroadcast(context, 0, deliveredIntent, flags);
+
+        BroadcastReceiver sentReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context arg0, Intent arg1) {
+                switch (getResultCode()) {
+                    case Activity.RESULT_OK:
+                        sendCallback("SMS sent", true);
+                        break;
+                    case SmsManager.RESULT_ERROR_GENERIC_FAILURE:
+                        sendCallback("Generic failure", false);
+                        break;
+                    case SmsManager.RESULT_ERROR_NO_SERVICE:
+                        sendCallback("No service", false);
+                        break;
+                    case SmsManager.RESULT_ERROR_NULL_PDU:
+                        sendCallback("Null PDU", false);
+                        break;
+                    case SmsManager.RESULT_ERROR_RADIO_OFF:
+                        sendCallback("Radio off", false);
+                        break;
                 }
-            }, new IntentFilter(SENT));
-
-            //---when the SMS has been delivered---
-            context.registerReceiver(new BroadcastReceiver() {
-                @Override
-                public void onReceive(Context arg0, Intent arg1) {
-                    switch (getResultCode()) {
-                        case Activity.RESULT_OK:
-                            sendEvent(mReactContext, "sms_onDelivery", "SMS delivered");
-                            break;
-                        case Activity.RESULT_CANCELED:
-                            sendEvent(mReactContext, "sms_onDelivery", "SMS not delivered");
-                            break;
-                    }
-                }
-            }, new IntentFilter(DELIVERED));
-
-            SmsManager sms = SmsManager.getDefault();
-
-            if (simSlot != null && simSlot < 2 && simSlot >= 0
-                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
-                SubscriptionManager localSubscriptionManager = SubscriptionManager.from(context);
-                if (localSubscriptionManager.getActiveSubscriptionInfoCount() > 1) {
-                    List localList = localSubscriptionManager.getActiveSubscriptionInfoList();
-
-                    SubscriptionInfo simInfo = (SubscriptionInfo) localList.get(simSlot);
-
-                    sms = SmsManager.getSmsManagerForSubscriptionId(simInfo.getSubscriptionId());
+                try {
+                    context.unregisterReceiver(this);
+                } catch (IllegalArgumentException e) {
                 }
             }
+        };
 
-            ArrayList<String> parts = sms.divideMessage(message);
-
-            for (int i = 0; i < parts.size(); i++) {
-                sentPendingIntents.add(i, sentPI);
-                deliveredPendingIntents.add(i, deliveredPI);
+        BroadcastReceiver deliveredReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context arg0, Intent arg1) {
+                switch (getResultCode()) {
+                    case Activity.RESULT_OK:
+                        sendEvent(mReactContext, "sms_onDelivery", "SMS delivered");
+                        break;
+                    case Activity.RESULT_CANCELED:
+                        sendEvent(mReactContext, "sms_onDelivery", "SMS not delivered");
+                        break;
+                }
+                try {
+                    context.unregisterReceiver(this);
+                } catch (IllegalArgumentException e) {
+                }
             }
-            sms.sendMultipartTextMessage(phoneNumber, null, parts, sentPendingIntents, deliveredPendingIntents);
+        };
 
+        IntentFilter sentFilter = new IntentFilter(SENT);
+        IntentFilter deliveredFilter = new IntentFilter(DELIVERED);
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(sentReceiver, sentFilter, Context.RECEIVER_NOT_EXPORTED);
+            context.registerReceiver(deliveredReceiver, deliveredFilter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            context.registerReceiver(sentReceiver, sentFilter);
+            context.registerReceiver(deliveredReceiver, deliveredFilter);
+        }
+
+        // Get default SmsManager if we can't access subscription info
+        SmsManager sms = SmsManager.getDefault();
+        
+        // Only try to get specific SIM if we have permission
+        if (simSlot != null && simSlot >= 0 && simSlot < 2) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    SubscriptionManager subscriptionManager = context.getSystemService(SubscriptionManager.class);
+                    if (subscriptionManager != null && subscriptionManager.getActiveSubscriptionInfoCount() > 1) {
+                        List<SubscriptionInfo> subscriptions = subscriptionManager.getActiveSubscriptionInfoList();
+                        if (subscriptions != null && subscriptions.size() > simSlot) {
+                            SubscriptionInfo simInfo = subscriptions.get(simSlot);
+                            sms = context.getSystemService(SmsManager.class)
+                                .createForSubscriptionId(simInfo.getSubscriptionId());
+                        }
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+                    SubscriptionManager localSubscriptionManager = SubscriptionManager.from(context);
+                    if (localSubscriptionManager.getActiveSubscriptionInfoCount() > 1) {
+                        List<SubscriptionInfo> localList = localSubscriptionManager.getActiveSubscriptionInfoList();
+                        SubscriptionInfo simInfo = localList.get(simSlot);
+                        sms = SmsManager.getSmsManagerForSubscriptionId(simInfo.getSubscriptionId());
+                    }
+                }
+            } catch (SecurityException e) {
+                // If we can't access subscription info, fall back to default SmsManager
+                sms = SmsManager.getDefault();
+            }
+        }
+
+        ArrayList<String> parts = sms.divideMessage(message);
+        for (int i = 0; i < parts.size(); i++) {
+            sentPendingIntents.add(i, sentPI);
+            deliveredPendingIntents.add(i, deliveredPI);
+        }
+        sms.sendMultipartTextMessage(phoneNumber, null, parts, sentPendingIntents, deliveredPendingIntents);
+
+        if (ContextCompat.checkSelfPermission(context, "android.permission.WRITE_SMS")  
+            == PackageManager.PERMISSION_GRANTED) {
             ContentValues values = new ContentValues();
             values.put("address", phoneNumber);
             values.put("body", message);
             context.getContentResolver().insert(Uri.parse("content://sms/sent"), values);
-
-        } catch (Exception e) {
-            sendCallback(e.getMessage(), false);
         }
+    } catch (Exception e) {
+        sendCallback(e.getMessage(), false);
     }
+}
 
 
     @ReactMethod
